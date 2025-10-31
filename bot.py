@@ -27,8 +27,16 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 PORT = int(os.getenv('PORT', 10000))
 
-if not TELEGRAM_BOT_TOKEN or not CHANNEL_ID:
-    logger.critical("Отсутствуют TELEGRAM_BOT_TOKEN или CHANNEL_ID")
+if not TELEGRAM_BOT_TOKEN:
+    logger.critical("❌ TELEGRAM_BOT_TOKEN не задан")
+    exit(1)
+
+# Убедимся, что CHANNEL_ID начинается с @ для публичного канала
+if CHANNEL_ID and not CHANNEL_ID.startswith(('-', '@')):
+    logger.warning("⚠️ CHANNEL_ID должен начинаться с '@' (публичный) или '-' (приватный). Исправьте в Render.")
+
+if not CHANNEL_ID:
+    logger.critical("❌ CHANNEL_ID не задан")
     exit(1)
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -49,7 +57,7 @@ SOURCES = [
     ("Bloomberg Politics", "https://www.bloomberg.com/politics/feeds/site.xml"),
 ]
 
-# === Ключевые слова ===
+# === Ключевые слова (регулярки) ===
 KEYWORDS_PATTERNS = [
     r"\brussia\b", r"\brussian\b", r"\bputin\b", r"\bukraine\b", r"\bzelensky\b",
     r"\bkremlin\b", r"\bmoscow\b", r"\bsanction[s]?\b", r"\bgazprom\b",
@@ -115,33 +123,29 @@ seen_urls = set()
 pending_articles = []
 lock = threading.Lock()
 
-# === Тестовая отправка при запуске ===
-def send_startup_test_message():
+# === Тестовое сообщение при запуске ===
+def send_startup_test():
     try:
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        test_msg = (
-            "🚀 Тестовое сообщение: бот запущен и готов к работе.\n\n"
+        msg = (
+            "✅ Бот успешно запущен!\n\n"
             f"Время запуска: {now_utc}\n\n"
-            "Новости будут приходить в :00 и :30 каждого часа."
+            "Новости по России и Украине будут приходить в :00 и :30 каждого часа (UTC)."
         )
-        test_msg = escape_markdown_v2(test_msg)
-        bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=test_msg,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        logger.info("✅ Тестовое сообщение отправлено при запуске.")
+        msg = escape_markdown_v2(msg)
+        bot.send_message(chat_id=CHANNEL_ID, text=msg, parse_mode=ParseMode.MARKDOWN_V2)
+        logger.info("✅ Тестовое сообщение отправлено.")
     except Exception as e:
-        logger.error(f"❌ Не удалось отправить тестовое сообщение: {e}")
+        logger.error(f"❌ Ошибка тестовой отправки: {e}")
 
-# === Основные функции (сбор, отправка, keep-alive) ===
+# === Основные функции ===
 def fetch_articles_for_window():
     global pending_articles
     new_articles = []
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=40)
 
-    logger.info("🔍 Сбор статей для ближайшей отправки...")
+    logger.info("🔍 Сбор статей...")
 
     for name, feed_url in SOURCES:
         try:
@@ -233,7 +237,7 @@ def send_pending_articles():
 def keep_alive_activity():
     while True:
         try:
-            logger.info("🔄 Keep-alive: проверка активности (14 мин)")
+            logger.info("🔄 Keep-alive: фоновая активность (14 мин)")
             fetch_articles_for_window()
         except Exception as e:
             logger.debug(f"Keep-alive error: {e}")
@@ -255,7 +259,7 @@ def schedule_send_loop():
 
         threading.Thread(target=send_pending_articles, daemon=True).start()
 
-# === HTTP-сервер ===
+# === HTTP-сервер для Render ===
 app = Flask(__name__)
 
 @app.route('/', defaults={'path': ''})
@@ -265,10 +269,13 @@ def health_check(path):
 
 # === Запуск ===
 if __name__ == '__main__':
-    logger.info("🚀 Бот запущен. Отправка тестового сообщения...")
-    # Отправляем тестовое сообщение в фоне (не блокируя сервер)
-    threading.Thread(target=send_startup_test_message, daemon=True).start()
+    logger.info("🚀 Запуск бота...")
+    # Отправка тестового сообщения
+    threading.Thread(target=send_startup_test, daemon=True).start()
 
+    # Фоновые задачи
     threading.Thread(target=keep_alive_activity, daemon=True).start()
     threading.Thread(target=schedule_send_loop, daemon=True).start()
+
+    # HTTP-сервер
     app.run(host='0.0.0.0', port=PORT)
