@@ -33,46 +33,50 @@ if not TELEGRAM_BOT_TOKEN or not CHANNEL_ID:
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-# === Источники с RSS ===
+# === ИСТОЧНИКИ ===
 SOURCES = [
-    ("Good Judgment", "https://goodjudgment.com/feed/"),
-    ("Johns Hopkins", "https://www.centerforhealthsecurity.org/feed/"),
-    ("Metaculus", "https://www.metaculus.com/feed/"),
-    ("RAND Corporation", "https://www.rand.org/rss.xml"),
-    ("World Economic Forum", "https://www.weforum.org/rss"),
+    ("E3G", "https://www.e3g.org/feed/"),
+    ("Foreign Affairs", "https://www.foreignaffairs.com/rss.xml"),
+    ("Reuters Institute", "https://reutersinstitute.politics.ox.ac.uk/rss.xml"),
+    ("Bruegel", "https://www.bruegel.org/feed"),
+    ("Chatham House", "https://www.chathamhouse.org/feed"),
     ("CSIS", "https://www.csis.org/rss.xml"),
     ("Atlantic Council", "https://www.atlanticcouncil.org/feed/"),
-    ("Chatham House", "https://www.chathamhouse.org/feed"),
-    ("The Economist", "https://www.economist.com/rss/rss.xml"),
-    ("Bloomberg", "https://www.bloomberg.com/feed/podcast/"),
-    ("Foreign Affairs", "https://www.foreignaffairs.com/rss.xml"),
+    ("RAND Corporation", "https://www.rand.org/rss.xml"),
     ("CFR", "https://www.cfr.org/rss.xml"),
-    ("BBC Future", "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml"),
     ("Carnegie Endowment", "https://carnegieendowment.org/feed/rss"),
-    ("Bruegel", "https://www.bruegel.org/feed"),
-    ("E3G", "https://www.e3g.org/feed/")
+    ("The Economist", "https://www.economist.com/rss/rss.xml"),
+    ("Bloomberg Politics", "https://www.bloomberg.com/politics/feeds/site.xml"),
 ]
 
-KEYWORDS = {
-    'russia', 'ukraine', 'putin', 'kremlin', 'sanctions', 'gas', 'oil',
-    'military', 'nato', 'eu', 'usa', 'europe', 'war', 'conflict',
-    'russian', 'ukrainian', 'moscow', 'kiev', 'kyiv', 'belarus',
-    'baltic', 'donbas', 'crimea', 'black sea', 'energy', 'grain',
-    'weapons', 'defense', 'geopolitic', 'strategic', 'security'
-}
-
-seen_urls = set()
-pending_articles = []
-lock = threading.Lock()
-
-# === Вспомогательные функции ===
+# === Ключевые слова ===
+KEYWORDS_PATTERNS = [
+    r"\brussia\b", r"\brussian\b", r"\bputin\b", r"\bukraine\b", r"\bzelensky\b",
+    r"\bkremlin\b", r"\bmoscow\b", r"\bsanction[s]?\b", r"\bgazprom\b",
+    r"\bnord\s?stream\b", r"\bwagner\b", r"\blavrov\b", r"\bnato\b", r"\bwar\b",
+    r"\bukrainian\b", r"\bkyiv\b", r"\bkiev\b", r"\bcrimea\b", r"\bdonbas\b",
+    r"\benergy\b", r"\boil\b", r"\bgas\b", r"\bgrain\b", r"\beu\b", r"\busa\b"
+]
 
 def contains_keywords(text: str) -> bool:
-    return any(kw in text.lower() for kw in KEYWORDS)
+    text_lower = text.lower()
+    return any(re.search(pattern, text_lower) for pattern in KEYWORDS_PATTERNS)
 
-def escape_markdown_v2(text: str) -> str:
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+def get_prefix(name: str) -> str:
+    name = name.lower()
+    if "e3g" in name: return "e3g"
+    if "foreign affairs" in name: return "foreignaffairs"
+    if "reuters" in name: return "reuters"
+    if "bruegel" in name: return "bruegel"
+    if "chatham" in name: return "chathamhouse"
+    if "csis" in name: return "csis"
+    if "atlantic" in name: return "atlanticcouncil"
+    if "rand" in name: return "rand"
+    if "cfr" in name: return "cfr"
+    if "carnegie" in name: return "carnegie"
+    if "economist" in name: return "economist"
+    if "bloomberg" in name: return "bloomberg"
+    return re.sub(r'[^a-z0-9]', '', name.split()[0])
 
 def translate_with_fallback(text: str, target='ru') -> str:
     if not text or not text.strip():
@@ -93,6 +97,10 @@ def translate_with_fallback(text: str, target='ru') -> str:
 
     return ""
 
+def escape_markdown_v2(text: str) -> str:
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+
 def is_generic_description(desc: str) -> bool:
     generic = ['appeared first on', 'read more', 'click here', 'continue reading', '©', 'All rights reserved']
     return any(phrase in desc.lower() for phrase in generic)
@@ -103,58 +111,42 @@ def get_lead(desc: str) -> str:
         return sentences[0].strip()
     return desc[:300].strip()
 
-# === Основной цикл: :20/:50 → проверка, :30/:00 → отправка ===
-def schedule_main_tasks():
-    while True:
-        now = datetime.now(timezone.utc)
-        current_minute = now.minute
+seen_urls = set()
+pending_articles = []
+lock = threading.Lock()
 
-        if current_minute < 20:
-            next_check = now.replace(minute=20, second=0, microsecond=0)
-        elif current_minute < 50:
-            next_check = now.replace(minute=50, second=0, microsecond=0)
-        else:
-            next_check = (now + timedelta(hours=1)).replace(minute=20, second=0, microsecond=0)
+# === Тестовая отправка при запуске ===
+def send_startup_test_message():
+    try:
+        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        test_msg = (
+            "🚀 Тестовое сообщение: бот запущен и готов к работе.\n\n"
+            f"Время запуска: {now_utc}\n\n"
+            "Новости будут приходить в :00 и :30 каждого часа."
+        )
+        test_msg = escape_markdown_v2(test_msg)
+        bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=test_msg,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        logger.info("✅ Тестовое сообщение отправлено при запуске.")
+    except Exception as e:
+        logger.error(f"❌ Не удалось отправить тестовое сообщение: {e}")
 
-        sleep_seconds = (next_check - now).total_seconds()
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
-
-        threading.Thread(target=fetch_articles_for_window, daemon=True).start()
-
-        send_time = next_check + timedelta(minutes=10)
-        now = datetime.now(timezone.utc)
-        sleep_to_send = (send_time - now).total_seconds()
-        if sleep_to_send > 0:
-            time.sleep(sleep_to_send)
-
-        threading.Thread(target=send_pending_articles, daemon=True).start()
-
-# === Фоновая активность каждые 14 минут (для Render) ===
-def keep_alive_activity():
-    """Проверка источников каждые 14 минут для поддержания активности."""
-    while True:
-        try:
-            logger.info("🔄 Keep-alive: фоновая проверка активности (каждые 14 мин)")
-            # Можно добавить лёгкий парсинг одного источника, но без отправки
-            # Например: feedparser.parse("https://example.com/feed") — не обязательно
-        except Exception as e:
-            logger.debug(f"Keep-alive error: {e}")
-        time.sleep(14 * 60)
-
-# === Логика сбора и отправки ===
+# === Основные функции (сбор, отправка, keep-alive) ===
 def fetch_articles_for_window():
     global pending_articles
     new_articles = []
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=40)
 
-    logger.info("🔍 Начало предварительной проверки источников (за 10 мин до отправки)")
+    logger.info("🔍 Сбор статей для ближайшей отправки...")
 
     for name, feed_url in SOURCES:
         try:
             feed = feedparser.parse(feed_url)
-            if not hasattr(feed, 'entries'):
+            if not hasattr(feed, 'entries') or not feed.entries:
                 continue
 
             for entry in feed.entries:
@@ -176,20 +168,20 @@ def fetch_articles_for_window():
                 title = entry.get('title', '').strip()
                 desc = entry.get('summary', '').strip()
 
-                if not desc or not title or is_generic_description(desc):
+                if not title or not desc or is_generic_description(desc):
                     continue
 
                 if not contains_keywords(title + ' ' + desc):
                     continue
 
                 lead = get_lead(desc)
-                prefix = re.sub(r'[^a-z0-9]', '', name.lower())
+                prefix = get_prefix(name)
 
                 title_ru = translate_with_fallback(title)
                 lead_ru = translate_with_fallback(lead)
 
                 if not title_ru or not lead_ru:
-                    logger.info(f"Пропущена статья от {name} — не удалось перевести: {url}")
+                    logger.info(f"Пропущена статья от {name} — перевод не удался: {url}")
                     continue
 
                 new_articles.append((prefix, title, lead, url))
@@ -203,7 +195,7 @@ def fetch_articles_for_window():
         for _, _, _, url in new_articles:
             seen_urls.add(url)
 
-    logger.info(f"✅ Найдено {len(new_articles)} статей для отправки")
+    logger.info(f"✅ Найдено {len(new_articles)} статей")
 
 def send_pending_articles():
     global pending_articles
@@ -219,7 +211,6 @@ def send_pending_articles():
             lead_ru = translate_with_fallback(lead)
 
             if not title_ru or not lead_ru:
-                logger.warning(f"Пропущена при отправке (перевод не удался): {url}")
                 continue
 
             message = (
@@ -237,9 +228,34 @@ def send_pending_articles():
             )
             logger.info(f"Отправлено: {url}")
         except Exception as e:
-            logger.error(f"Не удалось отправить {url}: {e}")
+            logger.error(f"Ошибка отправки {url}: {e}")
 
-# === HTTP-сервер для Render ===
+def keep_alive_activity():
+    while True:
+        try:
+            logger.info("🔄 Keep-alive: проверка активности (14 мин)")
+            fetch_articles_for_window()
+        except Exception as e:
+            logger.debug(f"Keep-alive error: {e}")
+        time.sleep(14 * 60)
+
+def schedule_send_loop():
+    while True:
+        now = datetime.now(timezone.utc)
+        current_minute = now.minute
+
+        if current_minute < 30:
+            next_send = now.replace(minute=30, second=0, microsecond=0)
+        else:
+            next_send = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+        sleep_sec = (next_send - now).total_seconds()
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
+
+        threading.Thread(target=send_pending_articles, daemon=True).start()
+
+# === HTTP-сервер ===
 app = Flask(__name__)
 
 @app.route('/', defaults={'path': ''})
@@ -249,7 +265,10 @@ def health_check(path):
 
 # === Запуск ===
 if __name__ == '__main__':
-    logger.info("🚀 Бот запущен. Инициализация планировщика...")
-    threading.Thread(target=schedule_main_tasks, daemon=True).start()
+    logger.info("🚀 Бот запущен. Отправка тестового сообщения...")
+    # Отправляем тестовое сообщение в фоне (не блокируя сервер)
+    threading.Thread(target=send_startup_test_message, daemon=True).start()
+
     threading.Thread(target=keep_alive_activity, daemon=True).start()
+    threading.Thread(target=schedule_send_loop, daemon=True).start()
     app.run(host='0.0.0.0', port=PORT)
