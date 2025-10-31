@@ -9,6 +9,7 @@ from flask import Flask
 from telegram import Bot
 from telegram.constants import ParseMode
 from deep_translator import GoogleTranslator, MyMemoryTranslator
+from urllib.parse import urldefrag
 
 # === Логирование ===
 logging.basicConfig(
@@ -74,7 +75,6 @@ def escape_markdown_v2(text: str) -> str:
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 def translate_with_fallback(text: str, target='ru') -> str:
-    """Пытается перевести через Google, при ошибке — через MyMemory."""
     if not text or not text.strip():
         return ""
     try:
@@ -103,6 +103,46 @@ def get_lead(desc: str) -> str:
         return sentences[0].strip()
     return desc[:300].strip()
 
+# === Основной цикл: :20/:50 → проверка, :30/:00 → отправка ===
+def schedule_main_tasks():
+    while True:
+        now = datetime.now(timezone.utc)
+        current_minute = now.minute
+
+        if current_minute < 20:
+            next_check = now.replace(minute=20, second=0, microsecond=0)
+        elif current_minute < 50:
+            next_check = now.replace(minute=50, second=0, microsecond=0)
+        else:
+            next_check = (now + timedelta(hours=1)).replace(minute=20, second=0, microsecond=0)
+
+        sleep_seconds = (next_check - now).total_seconds()
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
+
+        threading.Thread(target=fetch_articles_for_window, daemon=True).start()
+
+        send_time = next_check + timedelta(minutes=10)
+        now = datetime.now(timezone.utc)
+        sleep_to_send = (send_time - now).total_seconds()
+        if sleep_to_send > 0:
+            time.sleep(sleep_to_send)
+
+        threading.Thread(target=send_pending_articles, daemon=True).start()
+
+# === Фоновая активность каждые 14 минут (для Render) ===
+def keep_alive_activity():
+    """Проверка источников каждые 14 минут для поддержания активности."""
+    while True:
+        try:
+            logger.info("🔄 Keep-alive: фоновая проверка активности (каждые 14 мин)")
+            # Можно добавить лёгкий парсинг одного источника, но без отправки
+            # Например: feedparser.parse("https://example.com/feed") — не обязательно
+        except Exception as e:
+            logger.debug(f"Keep-alive error: {e}")
+        time.sleep(14 * 60)
+
+# === Логика сбора и отправки ===
 def fetch_articles_for_window():
     global pending_articles
     new_articles = []
@@ -145,7 +185,6 @@ def fetch_articles_for_window():
                 lead = get_lead(desc)
                 prefix = re.sub(r'[^a-z0-9]', '', name.lower())
 
-                # Проверяем перевод ДО добавления
                 title_ru = translate_with_fallback(title)
                 lead_ru = translate_with_fallback(lead)
 
@@ -154,8 +193,7 @@ def fetch_articles_for_window():
                     continue
 
                 new_articles.append((prefix, title, lead, url))
-
-                break  # только одна статья на источник
+                break
 
         except Exception as e:
             logger.error(f"Ошибка при парсинге {name}: {e}")
@@ -201,32 +239,6 @@ def send_pending_articles():
         except Exception as e:
             logger.error(f"Не удалось отправить {url}: {e}")
 
-def schedule_next_tasks():
-    while True:
-        now = datetime.now(timezone.utc)
-        current_minute = now.minute
-
-        if current_minute < 20:
-            next_check = now.replace(minute=20, second=0, microsecond=0)
-        elif current_minute < 50:
-            next_check = now.replace(minute=50, second=0, microsecond=0)
-        else:
-            next_check = (now + timedelta(hours=1)).replace(minute=20, second=0, microsecond=0)
-
-        sleep_seconds = (next_check - now).total_seconds()
-        if sleep_seconds > 0:
-            time.sleep(sleep_seconds)
-
-        threading.Thread(target=fetch_articles_for_window, daemon=True).start()
-
-        send_time = next_check + timedelta(minutes=10)
-        now = datetime.now(timezone.utc)
-        sleep_to_send = (send_time - now).total_seconds()
-        if sleep_to_send > 0:
-            time.sleep(sleep_to_send)
-
-        threading.Thread(target=send_pending_articles, daemon=True).start()
-
 # === HTTP-сервер для Render ===
 app = Flask(__name__)
 
@@ -238,5 +250,6 @@ def health_check(path):
 # === Запуск ===
 if __name__ == '__main__':
     logger.info("🚀 Бот запущен. Инициализация планировщика...")
-    threading.Thread(target=schedule_next_tasks, daemon=True).start()
+    threading.Thread(target=schedule_main_tasks, daemon=True).start()
+    threading.Thread(target=keep_alive_activity, daemon=True).start()
     app.run(host='0.0.0.0', port=PORT)
